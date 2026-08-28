@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: demo
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        # CI overwrites this with a hash of the ConfigMap + Secret contents.
+        #
+        # Why it matters: changing a ConfigMap does NOT restart pods. Without
+        # this annotation you edit the ConfigMap, `kubectl apply`, see "unchanged"
+        # on the Deployment, and your pods keep serving the old values with no
+        # error anywhere. Changing a pod-template annotation forces a rollout.
+        checksum/config: "replaced-by-ci"
+    spec:
+      # No imagePullSecrets here on purpose.
+      #
+      # `registry_integration = true` on the DOKS cluster makes DigitalOcean
+      # create the registry pull secret and attach it to the `default`
+      # ServiceAccount in every namespace. On EKS you would be wiring an
+      # ECR imagePullSecret yourself and refreshing its 12-hour token.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          # Tag is a placeholder; CI replaces it with the git SHA via
+          # `kubectl set image`. Never deploy :latest - you lose the ability to
+          # tell what is running and to roll back to a known build.
+          image: registry.digitalocean.com/REGISTRY_NAME/backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+
+          # ---------------------------------------------------------------
+          # The injection pattern.
+          #
+          # envFrom pulls in EVERY key from each source as an env var. This is
+          # what makes "each pod gets the secret" automatic - it applies to all
+          # replicas, and to any new pod the Deployment creates later.
+          # ---------------------------------------------------------------
+          envFrom:
+            - configMapRef:
+                name: backend-config    # APP_NAME, GREETING, LOG_LEVEL
+            - secretRef:
+                name: backend-secret    # API_KEY, DB_PASSWORD
+
+          env:
+            # The other idiom: pull one specific key rather than the whole
+            # object. Use this when you need to rename a key, or when you only
+            # want one value out of a large Secret.
+            - name: DB_PASSWORD_EXPLICIT
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: DB_PASSWORD
+
+            # Downward API - the pod tells the app its own identity. This is how
+            # /api/info can report which replica answered.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # No CPU limit on purpose: CPU is compressible, and a limit here
+              # just adds throttling latency. Memory IS limited, because memory
+              # is incompressible and a leak would take down the node.
+              memory: 192Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: demo
+spec:
+  # ClusterIP, not LoadBalancer. Only the ingress controller needs to reach this,
+  # and every LoadBalancer Service would provision a separate ~$12/mo DO LB.
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

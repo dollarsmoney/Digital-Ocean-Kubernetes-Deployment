@@ -1,0 +1,42 @@
+# One Ingress, one DigitalOcean Load Balancer, two backends split by path.
+#
+# The LB was created by the ingress-nginx Helm release in infra/main.tf. Adding
+# more Ingress objects reuses that same LB - they do NOT each provision one.
+# That is the cost argument for an ingress controller over per-app
+# `type: LoadBalancer` Services on DigitalOcean.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo
+  namespace: demo
+  annotations:
+    # Do not force HTTPS: this demo is HTTP-only (nip.io, no certificate).
+    # Leave this on once you add TLS.
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    # HOST_PLACEHOLDER is replaced by CI with app.<LB-IP>.nip.io.
+    # nip.io resolves *.1.2.3.4.nip.io -> 1.2.3.4, so you get a working hostname
+    # with no DNS setup at all. Host-based routing then works exactly as it
+    # would with a real domain.
+    - host: HOST_PLACEHOLDER
+      http:
+        paths:
+          # Longest matching prefix wins, so /api reaches the backend and
+          # everything else falls through to the frontend. Order in this list
+          # is not what decides it.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 3000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

@@ -1,0 +1,356 @@
+# ---------------------------------------------------------------------------
+# CI/CD for the DOKS demo.
+#
+#   quality      lint + unit tests + coverage + dependency audit
+#   sast         CodeQL static analysis of the JavaScript
+#   supply-chain Trivy dependency scan + SBOM
+#   iac-scan     Trivy misconfiguration scan of Terraform and k8s manifests
+#   build        build images, scan them with Trivy, then push (main only)
+#   deploy       roll out to the cluster (main only)
+#
+# Gates run in parallel; build waits for all of them, deploy waits for build.
+# A vulnerable image is therefore never pushed, and an unscanned image is never
+# deployed.
+#
+# Every action is pinned to a full commit SHA, not a tag. Tags are mutable - the
+# owner of an action (or anyone who compromises it) can repoint v4 at new code
+# and it runs with your secrets on the next build. This is exactly how the
+# tj-actions/changed-files compromise worked. A SHA is immutable.
+# Refresh deliberately with: gh api repos/<owner>/<repo>/git/ref/tags/<tag>
+# ---------------------------------------------------------------------------
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default. Jobs that need more opt in explicitly.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: registry.digitalocean.com
+  REGISTRY_NAME: learn-do-registry
+  CLUSTER_NAME: learn-do-cluster
+  NAMESPACE: demo
+
+jobs:
+  # -------------------------------------------------------------------------
+  quality:
+    name: Lint, unit tests, audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Do not leave a usable GITHUB_TOKEN in .git/config for later steps
+          # (or for anything malicious that a dependency might run).
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/backend/package-lock.json
+
+      # `npm ci` (not `npm install`) - installs exactly the lockfile and fails if
+      # package.json and the lockfile disagree. Reproducible, and it blocks a
+      # silently-upgraded transitive dependency.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests with coverage
+        run: npm test
+
+      # Fails the build on a known-vulnerable dependency. `|| true` is
+      # deliberately absent - this is a gate, not a report.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage
+          path: apps/backend/coverage/
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  sast:
+    name: Static analysis (CodeQL)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required to upload results to the Security tab
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+        with:
+          languages: javascript
+          # security-extended adds lower-severity rules that the default set skips.
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+        with:
+          category: /language:javascript
+
+  # -------------------------------------------------------------------------
+  supply-chain:
+    name: Dependency scan + SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # Reads package-lock.json and reports known CVEs in the dependency tree,
+      # including transitive ones. This is the "is anything in my supply chain
+      # already known-bad" check.
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: apps/backend
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true   # do not fail on CVEs with no available patch
+          format: table
+
+      # An SBOM is the inventory you need to answer "am I affected?" the next
+      # time something like Log4Shell lands, without rebuilding anything.
+      - name: Generate SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: apps/backend
+          format: cyclonedx
+          output: sbom-backend.cdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-backend
+          path: sbom-backend.cdx.json
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  iac-scan:
+    name: IaC misconfiguration scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # Catches things like a container without resource limits, a pod allowed
+      # to run as root, or a privileged securityContext - before they reach the
+      # cluster. Reports only; tighten to exit-code 1 once the baseline is clean.
+      - name: Trivy config scan (Terraform + Kubernetes)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+          format: table
+
+  # -------------------------------------------------------------------------
+  build:
+    name: Build, scan, push images
+    runs-on: ubuntu-latest
+    needs: [quality, sast, supply-chain, iac-scan]
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [backend, frontend]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Build locally first so Trivy can inspect the image BEFORE it is pushed.
+      # Scanning after pushing would mean a vulnerable image is already
+      # available for something to pull.
+      - name: Build image (load, do not push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: apps/${{ matrix.app }}
+          load: true
+          tags: ${{ matrix.app }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.app }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+      # Everything past here is main-only: PRs get the full set of checks, but
+      # never publish an artifact or touch the cluster.
+      - name: Log in to DigitalOcean Container Registry
+        if: github.ref == 'refs/heads/main'
+        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: doctl registry login
+        if: github.ref == 'refs/heads/main'
+        run: doctl registry login --expiry-seconds 1200
+
+      # Tagged with the commit SHA and with latest. The SHA tag is what gets
+      # deployed - it makes the running version identifiable and rollback a
+      # matter of pointing at an older SHA.
+      - name: Push image
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: apps/${{ matrix.app }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.REGISTRY_NAME }}/${{ matrix.app }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.REGISTRY_NAME }}/${{ matrix.app }}:latest
+          cache-from: type=gha
+
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy to DOKS
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Fetch kubeconfig
+        run: doctl kubernetes cluster kubeconfig save "$CLUSTER_NAME" --expiry-seconds 600
+
+      - name: Apply namespace and ConfigMap
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/backend-configmap.yaml
+
+      # The Secret is built here from GitHub secrets and never exists in git.
+      # `create --dry-run=client -o yaml | apply -f -` is the idempotent form;
+      # plain `kubectl create secret` errors out if the Secret already exists.
+      - name: Create/update backend Secret
+        env:
+          API_KEY: ${{ secrets.BACKEND_API_KEY }}
+          DB_PASSWORD: ${{ secrets.BACKEND_DB_PASSWORD }}
+        run: |
+          kubectl create secret generic backend-secret \
+            --namespace "$NAMESPACE" \
+            --from-literal=API_KEY="$API_KEY" \
+            --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Resolve the LB address that ingress-nginx was given, and build the
+      # nip.io hostname from it. nip.io maps app.1.2.3.4.nip.io -> 1.2.3.4, so
+      # host-based routing works with zero DNS configuration.
+      - name: Resolve ingress host
+        id: host
+        run: |
+          for i in $(seq 1 30); do
+            IP=$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+                  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            [ -n "$IP" ] && break
+            echo "waiting for load balancer IP ($i/30)..."
+            sleep 10
+          done
+          if [ -z "$IP" ]; then
+            echo "::error::Load balancer never got an IP. Is ingress-nginx installed (terraform apply)?"
+            exit 1
+          fi
+          echo "host=app.${IP}.nip.io" >> "$GITHUB_OUTPUT"
+          echo "Ingress host: app.${IP}.nip.io"
+
+      - name: Apply workloads
+        env:
+          HOST: ${{ steps.host.outputs.host }}
+        run: |
+          # Stamp the config hash into the pod template. Without this, editing
+          # backend-configmap.yaml changes the ConfigMap but leaves the running
+          # pods on the old values, with nothing to indicate anything is stale.
+          CHECKSUM=$(kubectl -n "$NAMESPACE" get configmap backend-config -o yaml \
+                     | sha256sum | cut -c1-16)
+
+          sed -e "s|REGISTRY_NAME|${REGISTRY_NAME}|g" \
+              -e "s|replaced-by-ci|${CHECKSUM}|g" \
+              k8s/backend.yaml | kubectl apply -f -
+
+          sed -e "s|REGISTRY_NAME|${REGISTRY_NAME}|g" \
+              k8s/frontend.yaml | kubectl apply -f -
+
+          sed -e "s|HOST_PLACEHOLDER|${HOST}|g" \
+              k8s/ingress.yaml | kubectl apply -f -
+
+      - name: Pin images to this commit
+        run: |
+          kubectl -n "$NAMESPACE" set image deployment/backend \
+            backend="${REGISTRY}/${REGISTRY_NAME}/backend:${GITHUB_SHA}"
+          kubectl -n "$NAMESPACE" set image deployment/frontend \
+            frontend="${REGISTRY}/${REGISTRY_NAME}/frontend:${GITHUB_SHA}"
+
+      # Blocks until the new pods are Ready. Without this the job would go green
+      # the instant the API accepted the manifests, even if every pod then
+      # crash-looped.
+      - name: Wait for rollout
+        run: |
+          kubectl -n "$NAMESPACE" rollout status deployment/backend --timeout=180s
+          kubectl -n "$NAMESPACE" rollout status deployment/frontend --timeout=180s
+
+      - name: Smoke test through the ingress
+        env:
+          HOST: ${{ steps.host.outputs.host }}
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS "http://${HOST}/api/health" > /dev/null; then
+              echo "backend healthy through ingress"
+              curl -fsS "http://${HOST}/api/info"
+              echo ""
+              echo "### Deployed: http://${HOST}" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "waiting for ingress to serve traffic ($i/20)..."
+            sleep 10
+          done
+          echo "::error::Ingress never served a healthy response"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          kubectl -n "$NAMESPACE" rollout undo deployment/backend || true
+          kubectl -n "$NAMESPACE" rollout undo deployment/frontend || true

@@ -1,0 +1,40 @@
+# --- Terraform ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+tfplan
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# .terraform.lock.hcl is intentionally NOT ignored - commit it.
+
+# --- Node ---
+node_modules/
+coverage/
+npm-debug.log*
+*.tsbuildinfo
+
+# --- Secrets: never commit a real one ---
+# Only k8s/backend-secret.example.yaml (placeholders) belongs in git.
+k8s/backend-secret.yaml
+*.secret.yaml
+.env
+.env.*
+kubeconfig
+*.kubeconfig
+
+# --- Scan output ---
+sbom-*.json
+trivy-results.*
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,15 @@
+# Non-sensitive configuration. This file IS committed to git - that is the whole
+# distinction between a ConfigMap and a Secret. Nothing here would matter if a
+# stranger read it.
+#
+# Every key below becomes an environment variable in every backend pod, via the
+# `envFrom.configMapRef` entry in backend.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: demo
+data:
+  APP_NAME: "do-learn-backend"
+  GREETING: "Hello from DOKS"
+  LOG_LEVEL: "info"
