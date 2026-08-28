@@ -94,10 +94,12 @@ resource "digitalocean_kubernetes_cluster" "this" {
 # turn on PROXY protocol here - that is only for the older REGIONAL type.
 # ---------------------------------------------------------------------------
 resource "helm_release" "ingress_nginx" {
-  name             = "ingress-nginx"
-  repository       = "https://kubernetes.github.io/ingress-nginx"
-  chart            = "ingress-nginx"
-  version          = "4.11.3"
+  name       = "ingress-nginx"
+  repository = "https://kubernetes.github.io/ingress-nginx"
+  chart      = "ingress-nginx"
+  # 4.11.x (app 1.11.3) predates the fix for CVE-2025-1974 "IngressNightmare".
+  # Keep this on a current release; the chart itself is a supply-chain input.
+  version          = "4.14.5"
   namespace        = "ingress-nginx"
   create_namespace = true
 
@@ -105,19 +107,23 @@ resource "helm_release" "ingress_nginx" {
   timeout = 600
   wait    = true
 
-  set {
-    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/do-loadbalancer-name"
-    value = "${var.cluster_name}-ingress-lb"
-  }
+  # helm provider v3 turned `set` from a repeated block into a list
+  # attribute, so these are elements of one list instead of three blocks.
+  set = [
+    {
+      name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/do-loadbalancer-name"
+      value = "${var.cluster_name}-ingress-lb"
+    },
 
-  # One LB node is plenty for a learning cluster; this is the cost knob.
-  set {
-    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/do-loadbalancer-size-unit"
-    value = "1"
-  }
+    # One LB node is plenty for a learning cluster; this is the cost knob.
+    {
+      name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/do-loadbalancer-size-unit"
+      value = "1"
+    },
 
-  set {
-    name  = "controller.replicaCount"
-    value = "2"
-  }
+    {
+      name  = "controller.replicaCount"
+      value = "2"
+    },
+  ]
 }

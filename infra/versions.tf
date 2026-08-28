@@ -8,7 +8,7 @@ terraform {
     }
     helm = {
       source  = "hashicorp/helm"
-      version = "~> 2.12"
+      version = "~> 3.0"
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"
@@ -35,7 +35,9 @@ provider "kubernetes" {
 }
 
 provider "helm" {
-  kubernetes {
+  # helm provider v3 turned this from a nested block into an object attribute,
+  # hence `kubernetes =` rather than `kubernetes {`.
+  kubernetes = {
     host  = digitalocean_kubernetes_cluster.this.endpoint
     token = digitalocean_kubernetes_cluster.this.kube_config[0].token
     cluster_ca_certificate = base64decode(
