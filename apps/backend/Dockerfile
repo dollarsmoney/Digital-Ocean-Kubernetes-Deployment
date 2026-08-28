@@ -26,6 +26,27 @@ FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a55
 ENV NODE_ENV=production
 WORKDIR /app
 
+# Two things the digest pin cannot fix on its own:
+#
+# 1. openssl 3.5.7-r0 in this layer has CVE-2026-14456 (fixed in 3.5.8-r0), and
+#    the node:22-alpine tag has not been rebuilt since it was pinned - the
+#    current tag still resolves to this exact digest. So patch it here.
+#
+# 2. npm ships ~11 HIGH/CRITICAL CVEs inside its OWN bundled dependencies
+#    (tar, pacote, sigstore, brace-expansion, picomatch, ip-address). None of
+#    them are reachable from this app, but a scanner cannot know that, and the
+#    honest fix is not to suppress them - it is to delete npm. This container
+#    runs `node src/server.js`; it never needs a package manager at runtime.
+#    The deps stage above still has npm, and that stage is discarded.
+#
+# apk upgrade does reintroduce some build-time nondeterminism, which is the
+# real trade-off against a fully frozen digest. Pinning plus a narrow,
+# deliberate upgrade is the usual compromise.
+RUN apk upgrade --no-cache libssl3 libcrypto3 \
+ && rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/bin/npm \
+           /usr/local/bin/npx
+
 # node:alpine ships an unprivileged `node` user (uid 1000). Use it.
 # The k8s securityContext enforces this too, but defense in depth is cheap.
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules

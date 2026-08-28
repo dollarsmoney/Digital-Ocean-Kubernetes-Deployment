@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# Keeps pinned dependencies from rotting silently.
+#
+# Both Dockerfiles pin their base image by digest, which is the right call for
+# supply-chain reasons but means the image never picks up OS package updates on
+# its own. Left alone, that is a slow leak: the frontend sat on a dead
+# `nginx:1.27-alpine` tag line until the Trivy image gate in ci-cd.yml failed a
+# build with 35 HIGH/CRITICAL CVEs.
+#
+# Dependabot parses the `tag@sha256:...` form used in both Dockerfiles. It
+# refreshes the digest when a tag is rebuilt, and bumps the tag when the line
+# moves on. The point is that rot arrives as a reviewable PR - which runs the
+# full pipeline, image scan included - instead of as a red build on someone's
+# unrelated branch weeks later.
+#
+# Note: this file alone is not enough on a private repo. Dependabot must also
+# be enabled under Settings -> Code security.
+# ---------------------------------------------------------------------------
+version: 2
+
+updates:
+  # `directory` points at the folder holding the Dockerfile, not the repo root.
+  - package-ecosystem: docker
+    directory: /apps/frontend
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps(docker)"
+
+  - package-ecosystem: docker
+    directory: /apps/backend
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps(docker)"
+
+  # ci-cd.yml SHA-pins every action for the same immutability reason, and those
+  # pins rot exactly the way the base image did. Dependabot updates the SHA and
+  # keeps the trailing `# v4` comment in step.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps(actions)"
