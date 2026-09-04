@@ -11,7 +11,7 @@
 # rebuilt or the line moves on. To do it by hand:
 #   docker pull nginx:1.31-alpine
 #   docker inspect --format='{{index .RepoDigests 0}}' nginx:1.31-alpine
-FROM nginx:1.31-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913
+FROM nginx:1.31-alpine@sha256:72ba65eb42c10344912a84ff42408db7d34f2feb642204570ab8fc5ffd29f1d3
 
 # The 1.31-alpine line is current, but openssl 3.5.7-r0 in it still carries
 # CVE-2026-14456 (fixed in 3.5.8-r0), which is enough to fail the Trivy gate.
