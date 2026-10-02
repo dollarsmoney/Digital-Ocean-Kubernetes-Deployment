@@ -7,7 +7,7 @@
 #
 # To refresh deliberately:
 #   docker pull node:22-alpine && docker inspect --format='{{index .RepoDigests 0}}' node:22-alpine
-FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS deps
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS deps
 
 WORKDIR /app
 
@@ -21,7 +21,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 
-FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS runtime
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /app
